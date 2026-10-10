@@ -32,6 +32,16 @@ describe('runMigrations', () => {
     db.exec(`INSERT INTO guild_projects (guild_id, website_url, github_url, updated_by)
       VALUES ('g1', 'https://a.dev/', 'https://github.com/a', 'u1')`);
     runMigrations(db);
-    expect(db.prepare('SELECT guild_id FROM guild_projects').all()).toEqual([{ guild_id: 'g1' }]);
+    expect(db.prepare('SELECT guild_id, github_url FROM guild_projects').all()).toEqual([
+      { guild_id: 'g1', github_url: 'https://github.com/a' },
+    ]);
+  });
+
+  it('allows saving a project without a GitHub link', () => {
+    const db = new Database(':memory:');
+    runMigrations(db);
+    db.exec(`INSERT INTO guild_projects (guild_id, website_url, github_url, updated_by)
+      VALUES ('g1', 'https://a.dev/', NULL, 'u1')`);
+    expect(db.prepare('SELECT github_url FROM guild_projects').get()).toEqual({ github_url: null });
   });
 });

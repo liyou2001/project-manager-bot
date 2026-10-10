@@ -22,6 +22,22 @@ const migrations: string[] = [
     prompted_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
   `,
+  // 2: make github_url optional. SQLite can't drop NOT NULL in place, so rebuild the table.
+  `
+  CREATE TABLE guild_projects_new (
+    guild_id    TEXT PRIMARY KEY,
+    guild_name  TEXT,
+    website_url TEXT NOT NULL,
+    github_url  TEXT,
+    updated_by  TEXT NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  INSERT INTO guild_projects_new (guild_id, guild_name, website_url, github_url, updated_by, created_at, updated_at)
+    SELECT guild_id, guild_name, website_url, github_url, updated_by, created_at, updated_at FROM guild_projects;
+  DROP TABLE guild_projects;
+  ALTER TABLE guild_projects_new RENAME TO guild_projects;
+  `,
 ];
 
 export function runMigrations(db: Database): void {

@@ -56,7 +56,7 @@ function buildPrompt(): MessageCreateOptions {
   const embed = new EmbedBuilder()
     .setTitle('Thanks for adding me!')
     .setDescription(
-      "To get started, I need your **hackathon page** (Devpost or the event site) and your project's **GitHub** link.\n" +
+      "To get started, I need your **hackathon page** (Devpost or the event site) and, optionally, your project's **GitHub** link.\n" +
         'Click the button below to enter them. You can change them later with `/setup`.',
     )
     .setColor(0x5865f2);
@@ -108,15 +108,15 @@ function buildSetupModal(existing?: ProjectRow): ModalBuilder {
 
   const github = new TextInputBuilder()
     .setCustomId(GITHUB_INPUT_ID)
-    .setLabel('GitHub URL')
+    .setLabel('GitHub URL (optional)')
     .setPlaceholder('https://github.com/owner/repo')
     .setStyle(TextInputStyle.Short)
-    .setRequired(true)
+    .setRequired(false)
     .setMaxLength(200);
 
   if (existing) {
     website.setValue(existing.website_url);
-    github.setValue(existing.github_url);
+    if (existing.github_url) github.setValue(existing.github_url);
   }
 
   return new ModalBuilder()
@@ -151,12 +151,15 @@ async function handleSetupSubmit(interaction: ModalSubmitInteraction): Promise<v
   }
 
   const websiteUrl = parseHttpUrl(interaction.fields.getTextInputValue(WEBSITE_INPUT_ID));
-  const githubUrl = parseGithubUrl(interaction.fields.getTextInputValue(GITHUB_INPUT_ID));
+  // GitHub is optional: blank means "not provided", anything else must be valid.
+  const githubInput = interaction.fields.getTextInputValue(GITHUB_INPUT_ID).trim();
+  const githubUrl = githubInput ? parseGithubUrl(githubInput) : null;
+  const githubInvalid = githubInput !== '' && !githubUrl;
 
-  if (!websiteUrl || !githubUrl) {
+  if (!websiteUrl || githubInvalid) {
     const errors: string[] = [];
     if (!websiteUrl) errors.push('• The hackathon page must be a valid URL, e.g. `https://your-hackathon.devpost.com`.');
-    if (!githubUrl) errors.push('• The GitHub link must look like `https://github.com/owner/repo`.');
+    if (githubInvalid) errors.push('• The GitHub link must look like `https://github.com/owner/repo`.');
     await interaction.reply({
       content: `Couldn't save that:\n${errors.join('\n')}\nRun \`/setup\` to try again.`,
       flags: MessageFlags.Ephemeral,
@@ -181,7 +184,7 @@ export function projectEmbed(project: ProjectRow): EmbedBuilder {
     .setTitle('Project links saved')
     .addFields(
       { name: 'Hackathon page', value: project.website_url },
-      { name: 'GitHub', value: project.github_url },
+      { name: 'GitHub', value: project.github_url ?? 'Not set' },
     )
     .setFooter({ text: 'Use /setup to change these.' })
     .setTimestamp(new Date(`${project.updated_at}Z`))

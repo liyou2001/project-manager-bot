@@ -4,7 +4,7 @@ export interface ProjectRow {
   guild_id: string;
   guild_name: string | null;
   website_url: string;
-  github_url: string;
+  github_url: string | null;
   updated_by: string;
   created_at: string;
   updated_at: string;
@@ -14,7 +14,7 @@ export interface ProjectInput {
   guildId: string;
   guildName: string | null;
   websiteUrl: string;
-  githubUrl: string;
+  githubUrl: string | null;
   updatedBy: string;
 }
 

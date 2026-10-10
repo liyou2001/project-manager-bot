@@ -2,12 +2,12 @@
 
 A Discord bot that helps a hackathon team manage its project. It reads the hackathon page, turns the team's idea into a timeline and task list, tracks who is working on what, and reminds the team before events.
 
-Right now it collects the team's hackathon page and GitHub links. The rest is being built in stages.
+Right now it collects the team's hackathon page and, optionally, their GitHub link. The rest is being built in stages.
 
 ## How it works
 
 1. When the bot is invited to a server, it posts a **Set up project** prompt in the server's system channel. If it can't post there, it uses the first text channel it can post in. If no channel works, it DMs the server owner. Servers that added the bot while it was offline get the prompt the next time it starts.
-2. Clicking the button opens a form asking for the **hackathon page** (Devpost or the event site) and the **GitHub URL**. Only members with **Manage Server** can submit it.
+2. Clicking the button opens a form asking for the **hackathon page** (Devpost or the event site) and, optionally, the **GitHub URL**. Only members with **Manage Server** can submit it.
 3. The links are checked and saved to `data/bot.db`, with one row per server.
 
 Slash commands:
@@ -79,6 +79,6 @@ The data is stored in the `guild_projects` table:
 | `guild_id`    | Discord server ID (primary key)     |
 | `guild_name`  | Server name at the time of saving   |
 | `website_url` | Hackathon page                      |
-| `github_url`  | GitHub user/org or repository URL   |
+| `github_url`  | GitHub user/org or repository URL, or empty |
 | `updated_by`  | Discord user ID of who last saved   |
 | `created_at`, `updated_at` | UTC timestamps         |
