@@ -9,11 +9,10 @@ Right now it collects the team's links, reads the hackathon site, and posts the 
 1. When the bot is invited to a server, it posts a **Set up project** prompt in the server's system channel. If it can't post there, it uses the first text channel it can post in. If no channel works, it DMs the server owner. Servers that added the bot while it was offline get the prompt the next time it starts.
 2. Clicking the button opens a form asking for the **hackathon page** (Devpost or the event site) and, optionally, the **GitHub URL**. Only members with **Manage Server** can submit it.
 3. The bot then reads the hackathon site and posts what it found:
-   - **Overview:** the event name, a short summary, the venue and the time zone.
-   - **Deadlines:** each with a live countdown.
+   - **Overview:** the event name, a short summary, the venue, the time zone and the next deadline.
    - **Requirements:** what the team has to submit.
    - **Judging criteria** and **Rules highlights.**
-   - **Schedule:** grouped by day.
+   - **Timeline:** the schedule and deadlines together, grouped by day. Deadlines are marked ⏰ with a live countdown.
 
    Times use Discord timestamps, so everyone sees them in their own time zone. A status message shows progress while the bot works, which takes about 30 seconds.
 4. If the site can't be read, or has no schedule, a **Paste schedule** button lets an admin paste the schedule, for example from the hackathon's Discord or a hacker guide.
@@ -26,7 +25,7 @@ Slash commands:
 | `/project` | Everyone | Shows the saved links |
 | `/event` | Everyone | Shows the schedule, deadlines, requirements and rules again |
 | `/refresh` | Members with Manage Server | Reads the hackathon site again |
-| `/timezone <zone>` | Members with Manage Server | Fixes the event's time zone if the bot guessed wrong |
+| `/timezone <zone>` | Members with Manage Server | Fixes the event's time zone if the bot guessed wrong. The fix survives `/refresh`; `/timezone auto` goes back to the guess |
 
 ## Setup
 
@@ -69,12 +68,13 @@ All AI calls go through [src/ai/llm.ts](src/ai/llm.ts), which uses the [Vercel A
 
 ## Reading hackathon sites
 
-The crawler in [src/web/](src/web/) reads up to 10 pages per run:
+The crawler in [src/web/](src/web/) reads up to 10 pages per run. It tries at most 15 pages and stops after 90 seconds or about 120,000 characters of text, so one slow or broken site can't hold things up.
 
 - **Devpost:** the main page, `/details/dates`, `/rules`, `/updates` and `/resources`. Pages like participants and the project gallery are skipped.
 - **The official site:** the hackathon's own site, where workshop schedules usually live. The crawler finds it among the links (or website names) on the Devpost page by matching it to the event name, so sponsor links aren't followed. On that site it prefers schedule, agenda and FAQ pages.
 - **JavaScript-heavy pages:** schedule pages on official sites are opened in headless Chromium, and the crawler clicks each day tab ("Saturday", "Day 2") so schedules split across tabs are read in full. Without Chromium the bot still works, but it may miss these schedules.
-- **Safety:** the crawler respects `robots.txt`, waits between requests to the same site, and refuses links that point to private network addresses.
+- **Safety:** the crawler respects `robots.txt` (in the browser too), waits between requests to the same site, and refuses links that point to private network addresses. In the browser, every request and every redirect hop is checked the same way, and service workers and WebSockets are turned off.
+- **Known gap:** the address check looks up a site's address separately from the request itself, so a site that changes its DNS answer in between (DNS rebinding) could get past it. That only matters if the bot runs somewhere with internal services worth protecting.
 
 To test against a real site without Discord:
 
@@ -109,5 +109,5 @@ All data is in `data/bot.db`.
 | --- | --- |
 | `guild_projects` | Each server's hackathon page and GitHub links, and who saved them |
 | `guild_prompts` | Which servers have been sent the setup prompt |
-| `event_info` | What was read from the hackathon site: summary, venue, time zone, requirements, judging criteria, rules, which pages were read, and any pasted text |
+| `event_info` | What was read from the hackathon site: summary, venue, detected and manual time zones, requirements, judging criteria, rules, which pages were read, and any pasted text. Pasted text and a manual time zone are cleared when the hackathon link changes |
 | `timeline_items` | Schedule items and deadlines, stored both as written on the site and in UTC |

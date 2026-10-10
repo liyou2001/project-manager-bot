@@ -72,9 +72,65 @@ export async function replyWithEventCards(interaction: ChatInputCommandInteracti
   for (const message of rest) await interaction.followUp({ ...message, allowedMentions: NO_MENTIONS });
 }
 
+/** A failure whose message is already written for the user. */
+class RefreshError extends Error {}
+
+const firstLine = (error: unknown) => ((error as Error)?.message ?? String(error)).split('\n')[0]!.slice(0, 200);
+
+type Status = Awaited<ReturnType<typeof openStatus>>;
+
+/** The steps of a refresh after the status message is up. Throws on failure. */
+async function readSite(status: Status, guildId: string, url: string): Promise<void> {
+  // Pasted text and a manual time zone only carry over while the link stays the same.
+  const previous = getEventInfo(guildId);
+  const sameSource = previous?.sourceUrl === url;
+  const pastedText = sameSource ? previous.pastedText : null;
+  const timezoneOverride = sameSource ? previous.timezoneOverride : null;
+
+  const renderer = createRenderer();
+  let result;
+  try {
+    result = await crawl(url, { fetchHtml, renderer }, {
+      onPage: (page, count) => {
+        const where = `${new URL(page.url).host}${new URL(page.url).pathname}`;
+        return status.progress(`🔎 Reading the hackathon site… ${count} page${count === 1 ? '' : 's'} so far (${where})`);
+      },
+    });
+  } finally {
+    await renderer.close();
+  }
+
+  if (result.pages.length === 0 && !pastedText) {
+    await status.finish([buildFailureMessage(url, result.skipped.map((page) => page.reason))]);
+    return;
+  }
+
+  const pageCount = result.pages.length;
+  const what = [pageCount ? `${pageCount} page${pageCount === 1 ? '' : 's'}` : null, pastedText ? 'your pasted text' : null]
+    .filter(Boolean)
+    .join(' and ');
+  await status.progress(`🧠 Summarizing ${what}… (this takes about 30 seconds)`, { force: true });
+
+  let raw;
+  try {
+    raw = await extractEventInfo({ startUrl: url, pages: result.pages, eventHints: result.eventHints, pastedText });
+  } catch (error) {
+    throw new RefreshError(`I read the site, but summarizing it failed: ${firstLine(error)}`, { cause: error });
+  }
+
+  const event = normalizeEvent(raw, { timezoneOverride });
+  saveEventInfo(guildId, url, event, {
+    pages: result.pages.map((page) => ({ url: page.url, rendered: page.rendered })),
+    skipped: result.skipped,
+    unreadableTimes: event.unreadableTimes,
+  });
+  await status.finish(buildEventMessages(getEventInfo(guildId)!, listTimeline(guildId)));
+}
+
 /**
  * Crawl the hackathon site, extract the event info with the AI model, save it, and post the
  * cards, editing a status message as it goes. Only one refresh runs per server at a time.
+ * Any failure replaces the status with an explanation and a Try again button.
  */
 export async function runEventRefresh(interaction: RefreshInteraction): Promise<void> {
   const { guildId } = interaction;
@@ -94,50 +150,19 @@ export async function runEventRefresh(interaction: RefreshInteraction): Promise<
   }
 
   inProgress.add(guildId);
+  const url = project.website_url;
+  let status: Status | null = null;
   try {
-    const url = project.website_url;
-    const status = await openStatus(interaction, `🔎 Reading ${url}…`);
-
-    const renderer = await createRenderer();
-    let result;
-    try {
-      result = await crawl(url, { fetchHtml, renderer }, {
-        onPage: (page, count) =>
-          status.progress(`🔎 Reading the hackathon site… ${count} page${count === 1 ? '' : 's'} so far (${new URL(page.url).host}${new URL(page.url).pathname})`),
-      });
-    } finally {
-      await renderer?.close();
-    }
-
-    const pastedText = getEventInfo(guildId)?.pastedText ?? null;
-    if (result.pages.length === 0 && !pastedText) {
-      await status.finish([buildFailureMessage(url, result.skipped.map((page) => page.reason))]);
-      return;
-    }
-
-    const pageCount = result.pages.length;
-    const what = [
-      pageCount ? `${pageCount} page${pageCount === 1 ? '' : 's'}` : null,
-      pastedText ? 'your pasted text' : null,
-    ].filter(Boolean).join(' and ');
-    await status.progress(`🧠 Summarizing ${what}… (this takes about 30 seconds)`, { force: true });
-    let raw;
-    try {
-      raw = await extractEventInfo({ startUrl: url, pages: result.pages, eventHints: result.eventHints, pastedText });
-    } catch (error) {
-      console.error(`Event extraction failed for guild ${guildId}:`, error);
-      const reason = (error as Error).message.split('\n')[0]!.slice(0, 200);
-      await status.finish([buildFailureMessage(url, [`I read the site, but summarizing it failed: ${reason}`])]);
-      return;
-    }
-
-    const event = normalizeEvent(raw);
-    saveEventInfo(guildId, url, event, {
-      pages: result.pages.map((page) => ({ url: page.url, rendered: page.rendered })),
-      skipped: result.skipped,
-      unreadableTimes: event.unreadableTimes,
-    });
-    await status.finish(buildEventMessages(getEventInfo(guildId)!, listTimeline(guildId)));
+    status = await openStatus(interaction, `🔎 Reading ${url}…`);
+    await readSite(status, guildId, url);
+  } catch (error) {
+    console.error(`Reading the hackathon site failed for guild ${guildId}:`, error);
+    // Without a status message there's nothing to update; let the interaction router report it.
+    if (!status) throw error;
+    const reason = error instanceof RefreshError ? error.message : `Something went wrong: ${firstLine(error)}`;
+    await status
+      .finish([buildFailureMessage(url, [reason])])
+      .catch((finishError: unknown) => console.error('Could not post the failure message:', finishError));
   } finally {
     inProgress.delete(guildId);
   }

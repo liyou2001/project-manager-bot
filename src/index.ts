@@ -21,9 +21,18 @@ try {
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
+// Without an 'error' listener, any error discord.js emits (including a failed async event
+// handler) would crash the bot.
+client.on(Events.Error, (error) => console.error('Discord client error:', error));
+process.on('unhandledRejection', (reason) => console.error('Unhandled promise rejection:', reason));
+
 client.once(Events.ClientReady, async (readyClient) => {
-  await readyClient.application.commands.set(commands.map((command) => command.data.toJSON()));
   console.log(`Logged in as ${readyClient.user.tag} (in ${readyClient.guilds.cache.size} servers)`);
+  try {
+    await readyClient.application.commands.set(commands.map((command) => command.data.toJSON()));
+  } catch (error) {
+    console.error('Could not register slash commands:', error);
+  }
 
   // Catch servers that added the bot while it was offline.
   for (const guild of readyClient.guilds.cache.values()) {

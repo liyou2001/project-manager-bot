@@ -163,7 +163,6 @@ async function handleSetupSubmit(interaction: ModalSubmitInteraction): Promise<v
     return;
   }
 
-  const previous = getProject(interaction.guildId);
   saveProject({
     guildId: interaction.guildId,
     guildName: interaction.guild?.name ?? null,
@@ -176,8 +175,10 @@ async function handleSetupSubmit(interaction: ModalSubmitInteraction): Promise<v
   if (!saved) return;
   await interaction.reply({ embeds: [projectEmbed(saved)] });
 
-  // Read the hackathon site when the link is new or changed, or it hasn't been read yet.
-  if (previous?.website_url !== saved.website_url || !getEventInfo(interaction.guildId)?.fetchedAt) {
+  // Read the site unless what's stored was already read from this exact link.
+  // (Compare with the stored event, not the previous setup: an earlier read may have failed.)
+  const event = getEventInfo(interaction.guildId);
+  if (event?.sourceUrl !== saved.website_url || !event.fetchedAt) {
     await runEventRefresh(interaction);
   }
 }

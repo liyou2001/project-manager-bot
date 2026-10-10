@@ -1,5 +1,5 @@
 import { extractPage, type EventHint, type ExtractedPage, type PageLink } from './extract.js';
-import type { FetchedHtml } from './fetch.js';
+import { FetchError, type FetchedHtml } from './fetch.js';
 import {
   domainsInText,
   findDevpostSite,
@@ -9,7 +9,7 @@ import {
   scoreLink,
   type SiteRoles,
 } from './links.js';
-import type { Renderer } from './render.js';
+import type { RenderedPage, Renderer } from './render.js';
 
 export interface CrawledPage {
   url: string;
@@ -40,10 +40,15 @@ export interface CrawlDeps {
 }
 
 export interface CrawlOptions {
+  /** Pages to read successfully. */
   maxPages?: number;
+  /** Pages to try at all, including ones that fail, so a broken site can't keep the crawl going. */
+  maxAttempts?: number;
   maxDepth?: number;
   /** Total text budget across all pages, so the AI prompt stays a sensible size. */
   maxChars?: number;
+  /** Stop starting new pages after this long. */
+  timeLimitMs?: number;
   onPage?(page: CrawledPage, pagesRead: number): void | Promise<void>;
 }
 
@@ -56,6 +61,8 @@ interface QueueItem {
 
 const MIN_TEXT_FOR_PLAIN_FETCH = 300;
 const MIN_USEFUL_TEXT = 50;
+/** Once less than this much text budget is left, no page is worth fetching. */
+const MIN_REMAINING_BUDGET = 1_000;
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -73,19 +80,46 @@ function eventNameFrom(page: ExtractedPage): string | null {
   return title || null;
 }
 
-/** Append text revealed by clicking day tabs, skipping lines the page text already has. */
-function withTabTexts(text: string, tabTexts: { label: string; text: string }[]): string {
-  const seen = new Set(text.split('\n'));
-  const sections: string[] = [];
-  for (const tab of tabTexts) {
-    const fresh = tab.text
-      .split('\n')
-      .map((line) => line.replace(/\s+/g, ' ').trim())
-      .filter((line) => line && !seen.has(line));
-    fresh.forEach((line) => seen.add(line));
-    if (fresh.length) sections.push(`## ${tab.label}\n${fresh.join('\n')}`);
+/**
+ * The lines of `lines` that differ from `base`, dropping the shared beginning and end
+ * (header, day buttons, footer). Repeated lines in the middle, like the same time on
+ * two days, are kept.
+ */
+export function differingMiddle(lines: string[], base: string[]): string[] {
+  let start = 0;
+  while (start < lines.length && start < base.length && lines[start] === base[start]) start++;
+  let end = 0;
+  while (
+    end < lines.length - start &&
+    end < base.length - start &&
+    lines[lines.length - 1 - end] === base[base.length - 1 - end]
+  ) {
+    end++;
   }
-  return [text, ...sections].join('\n');
+  return lines.slice(start, lines.length - end);
+}
+
+/** Text from a rendered page plus what each day tab showed that the page itself didn't. */
+function renderedText(rendered: RenderedPage): ExtractedPage {
+  const page = extractPage(rendered.html, rendered.url);
+  const baseLines = page.text.split('\n');
+  const seen = new Set<string>();
+  const sections: string[] = [];
+  for (const tab of rendered.tabs) {
+    const middle = differingMiddle(extractPage(tab.html, rendered.url).text.split('\n'), baseLines);
+    const key = middle.join('\n');
+    // The tab showing by default adds nothing; two tabs showing the same thing count once.
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    sections.push(`## ${tab.label}\n${key}`);
+  }
+  page.text = [page.text, ...sections].join('\n');
+  return page;
+}
+
+/** Failures the headless browser might get past. Robots blocks, files and unsafe hosts aren't retried. */
+function worthRendering(error: unknown): boolean {
+  return !(error instanceof FetchError) || error.kind === 'http' || error.kind === 'network';
 }
 
 /**
@@ -93,8 +127,9 @@ function withTabTexts(text: string, tabTexts: { label: string; text: string }[])
  * schedules, dates, rules, FAQs. Uses the headless browser for pages that need it.
  */
 export async function crawl(startUrl: string, deps: CrawlDeps, options: CrawlOptions = {}): Promise<CrawlResult> {
-  const { maxPages = 10, maxDepth = 2, maxChars = 120_000 } = options;
+  const { maxPages = 10, maxAttempts = 15, maxDepth = 2, maxChars = 120_000, timeLimitMs = 90_000 } = options;
   const delayMs = deps.delayMs ?? 300;
+  const deadline = Date.now() + timeLimitMs;
 
   const queue: QueueItem[] = [{ url: startUrl, linkText: '', score: Infinity, depth: 0 }];
   const visited = new Set<string>();
@@ -105,6 +140,7 @@ export async function crawl(startUrl: string, deps: CrawlDeps, options: CrawlOpt
   const roles: SiteRoles = { devpostHost: null, officialHost: null };
   let eventName: string | null = null;
   let usedChars = 0;
+  let attempts = 0;
   let rolesKnown = false;
 
   const politely = async <T>(url: string, load: () => Promise<T>): Promise<T> => {
@@ -126,39 +162,47 @@ export async function crawl(startUrl: string, deps: CrawlDeps, options: CrawlOpt
     }
   };
 
-  while (queue.length > 0 && pages.length < maxPages) {
+  /** Why the crawl should stop now, or null to keep going. */
+  const stopReason = (): string | null => {
+    if (pages.length >= maxPages) return 'Page limit reached';
+    if (attempts >= maxAttempts) return 'Too many pages tried';
+    if (maxChars - usedChars < MIN_REMAINING_BUDGET) return 'Size limit for one summary reached';
+    if (attempts > 0 && Date.now() >= deadline) return 'Time limit reached';
+    return null;
+  };
+
+  while (queue.length > 0 && !stopReason()) {
     queue.sort((a, b) => b.score - a.score);
     const item = queue.shift()!;
     const key = pageKey(item.url);
     if (visited.has(key)) continue;
     visited.add(key);
+    attempts++;
 
     const host = new URL(item.url).hostname;
     const isDevpost = host === roles.devpostHost || isDevpostHackathonHost(host);
     let page: ExtractedPage | null = null;
     let finalUrl = item.url;
     let rendered = false;
-    let error: string | null = null;
+    let error: unknown = null;
 
     try {
       const fetched = await politely(item.url, () => deps.fetchHtml(item.url));
       finalUrl = fetched.url;
       page = extractPage(fetched.html, fetched.url);
     } catch (fetchError) {
-      error = (fetchError as Error).message;
+      error = fetchError;
     }
 
     // Devpost renders on the server. Other sites often build schedules with JavaScript
-    // or hide days behind tabs, so render those (and anything that came back empty).
-    const wantsRender =
-      deps.renderer &&
-      !isDevpost &&
-      (!page || page.text.length < MIN_TEXT_FOR_PLAIN_FETCH || isScheduleLike(item.url, item.linkText));
+    // or hide days behind tabs, so render those (and pages a plain fetch couldn't get).
+    const wantsRender = page
+      ? !isDevpost && (page.text.length < MIN_TEXT_FOR_PLAIN_FETCH || isScheduleLike(item.url, item.linkText))
+      : !isDevpost && worthRendering(error);
     if (wantsRender && deps.renderer) {
       try {
-        const result = await politely(item.url, () => deps.renderer!.render(item.url));
-        const renderedPage = extractPage(result.html, result.url);
-        renderedPage.text = withTabTexts(renderedPage.text, result.tabTexts);
+        const result = await politely(finalUrl, () => deps.renderer!.render(finalUrl));
+        const renderedPage = renderedText(result);
         if (!page || renderedPage.text.length >= page.text.length) {
           renderedPage.links = [...(page?.links ?? []), ...renderedPage.links];
           page = renderedPage;
@@ -166,12 +210,12 @@ export async function crawl(startUrl: string, deps: CrawlDeps, options: CrawlOpt
           rendered = true;
         }
       } catch (renderError) {
-        error ??= (renderError as Error).message;
+        error ??= renderError;
       }
     }
 
     if (!page) {
-      skipped.push({ url: item.url, reason: error ?? 'Could not load page' });
+      skipped.push({ url: item.url, reason: (error as Error | null)?.message ?? 'Could not load page' });
       continue;
     }
     // A redirect can land on a page we've already read (e.g. example.com -> www.example.com/).
@@ -204,7 +248,7 @@ export async function crawl(startUrl: string, deps: CrawlDeps, options: CrawlOpt
       continue;
     }
     if (usedChars + page.text.length > maxChars) {
-      skipped.push({ url: finalUrl, reason: 'Over the size limit for one summary' });
+      skipped.push({ url: finalUrl, reason: 'Too long to fit in one summary' });
       continue;
     }
     usedChars += page.text.length;
@@ -213,10 +257,11 @@ export async function crawl(startUrl: string, deps: CrawlDeps, options: CrawlOpt
     await options.onPage?.(crawled, pages.length);
   }
 
+  const leftoverReason = stopReason() ?? 'Not reached';
   for (const item of queue) {
     if (!visited.has(pageKey(item.url))) {
       visited.add(pageKey(item.url));
-      skipped.push({ url: item.url, reason: 'Page limit reached' });
+      skipped.push({ url: item.url, reason: leftoverReason });
     }
   }
   return { pages, skipped, eventName, eventHints, roles };

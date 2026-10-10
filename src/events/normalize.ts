@@ -26,7 +26,10 @@ export interface NormalizedEvent {
   name: string;
   summary: string;
   venue: string | null;
+  /** Zone used for the UTC times: the manual override if there is one, else the detected zone. */
   timezone: string | null;
+  /** Zone found on the site (validated), kept so clearing an override can fall back to it. */
+  detectedTimezone: string | null;
   requirements: string[];
   judgingCriteria: JudgingCriterion[];
   rules: string[];
@@ -37,13 +40,28 @@ export interface NormalizedEvent {
 
 const MAX_RULES = 8;
 
+/**
+ * A real location-based time zone like "America/New_York" (or "UTC"). Legacy fixed-offset
+ * names like "EST" or "Etc/GMT+5" are rejected: they ignore daylight saving, which would put
+ * every time an hour off for half the year.
+ */
 export function isValidTimezone(zone: string | null | undefined): zone is string {
-  return !!zone && IANAZone.isValidZone(zone);
+  if (!zone || !IANAZone.isValidZone(zone)) return false;
+  return zone === 'UTC' || (zone.includes('/') && !zone.startsWith('Etc/'));
 }
 
-/** Parse a local "YYYY-MM-DDTHH:mm" time; returns it normalized, or null if unreadable. */
+const LOCAL_TIME = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{1,2}):(\d{2})/;
+
+/**
+ * Parse a local "YYYY-MM-DDTHH:mm" time; returns it normalized, or null if unreadable.
+ * Seconds and any UTC offset the model adds are ignored: the wall-clock time is what was
+ * written on the page. Date-only values are unreadable (no time to remind people at).
+ */
 export function parseLocalTime(local: string): string | null {
-  const parsed = DateTime.fromISO(local.trim().replace(' ', 'T'), { zone: 'utc' });
+  const match = local.trim().match(LOCAL_TIME);
+  if (!match) return null;
+  const [, year, month, day, hour, minute] = match.map(Number) as number[];
+  const parsed = DateTime.fromObject({ year, month, day, hour, minute }, { zone: 'utc' });
   return parsed.isValid ? parsed.toFormat("yyyy-MM-dd'T'HH:mm") : null;
 }
 
@@ -54,9 +72,15 @@ export function localToUtc(local: string | null, zone: string | null): string | 
   return parsed.isValid ? parsed.toUTC().toISO({ suppressMilliseconds: true }) : null;
 }
 
+export interface NormalizeOptions {
+  /** A time zone an admin set with /timezone; wins over the one found on the site. */
+  timezoneOverride?: string | null;
+}
+
 /** Validate times and time zone, convert to UTC, drop duplicates, and sort the timeline. */
-export function normalizeEvent(raw: EventInfo): NormalizedEvent {
-  const timezone = isValidTimezone(raw.timezone) ? raw.timezone : null;
+export function normalizeEvent(raw: EventInfo, options: NormalizeOptions = {}): NormalizedEvent {
+  const detectedTimezone = isValidTimezone(raw.timezone) ? raw.timezone : null;
+  const timezone = isValidTimezone(options.timezoneOverride) ? options.timezoneOverride : detectedTimezone;
   const entries: TimelineEntry[] = [];
   let unreadableTimes = 0;
 
@@ -102,6 +126,7 @@ export function normalizeEvent(raw: EventInfo): NormalizedEvent {
     summary: raw.summary.trim(),
     venue: raw.venue?.trim() || null,
     timezone,
+    detectedTimezone,
     requirements: clean(raw.requirements),
     judgingCriteria: raw.judgingCriteria.filter((criterion) => criterion.name.trim()),
     rules: clean(raw.rules).slice(0, MAX_RULES),

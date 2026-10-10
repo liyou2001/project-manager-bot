@@ -10,18 +10,23 @@ import { DateTime } from 'luxon';
 import type { StoredEvent, TimelineItem } from '../db/events.js';
 
 // Discord limits
-const EMBED_DESCRIPTION_LIMIT = 4096;
+const LIMITS = { title: 256, description: 4096, fieldName: 256, fieldValue: 1024, footer: 2048 };
 const MESSAGE_EMBED_CHARS = 6000;
 const EMBEDS_PER_MESSAGE = 10;
 
 export const PASTE_BUTTON_ID = 'event:paste';
 export const RETRY_BUTTON_ID = 'event:retry';
 
-const COLORS = { overview: 0x5865f2, deadlines: 0xed4245, requirements: 0xfee75c, judging: 0x57f287, schedule: 0x5865f2 };
+const COLORS = { overview: 0x5865f2, requirements: 0xfee75c, judging: 0x57f287, timeline: 0x5865f2, failure: 0xed4245 };
 
 export interface EventMessage {
   embeds: EmbedBuilder[];
   components: ActionRowBuilder<MessageActionRowComponentBuilder>[];
+}
+
+/** Shorten to `max` characters, ending in "…" if anything was cut. */
+export function truncate(value: string, max: number): string {
+  return value.length <= max ? value : `${value.slice(0, max - 1)}…`;
 }
 
 /** Group lines into chunks of at most `maxChars`, breaking only between lines where possible. */
@@ -75,7 +80,7 @@ export function packEmbeds(embeds: EmbedBuilder[]): EmbedBuilder[][] {
 /** One embed per chunk of lines, titled "Title" then "Title (continued)". */
 function sectionEmbeds(title: string, lines: string[], color: number): EmbedBuilder[] {
   if (lines.length === 0) return [];
-  return chunkLines(lines, EMBED_DESCRIPTION_LIMIT).map((chunk, i) =>
+  return chunkLines(lines, LIMITS.description).map((chunk, i) =>
     new EmbedBuilder()
       .setTitle(i === 0 ? title : `${title} (continued)`)
       .setDescription(chunk)
@@ -86,35 +91,49 @@ function sectionEmbeds(title: string, lines: string[], color: number): EmbedBuil
 const unix = (iso: string) => Math.floor(Date.parse(iso) / 1000);
 const text = (value: string) => escapeMarkdown(value);
 
-/** "<t:...:f>" when the UTC time is known (shown in each viewer's time zone), else the local time as written. */
+/**
+ * "<t:...>" when the UTC time is known (Discord shows it in each viewer's time zone),
+ * otherwise the local time exactly as written on the site.
+ */
 function when(local: string, utc: string | null, style: 't' | 'f'): string {
   if (utc) return `<t:${unix(utc)}:${style}>`;
-  const parsed = DateTime.fromISO(local);
-  return parsed.toFormat(style === 't' ? 'h:mm a' : 'ccc LLL d, h:mm a');
+  // Read as UTC only to avoid the host's own daylight-saving rules shifting the wall time.
+  return DateTime.fromISO(local, { zone: 'utc' }).toFormat(style === 't' ? 'h:mm a' : 'ccc LLL d, h:mm a');
 }
 
-function deadlineLines(items: TimelineItem[]): string[] {
-  return items.map((item) => {
-    const countdown = item.startsAt ? ` · <t:${unix(item.startsAt)}:R>` : '';
-    const detail = item.description ? ` — ${text(item.description)}` : '';
-    return `${when(item.localStart, item.startsAt, 'f')}${countdown} — **${text(item.title)}**${detail}`;
-  });
-}
-
-function scheduleLines(items: TimelineItem[]): string[] {
+/** Schedule and deadlines together, grouped by day; deadlines are marked ⏰ with a countdown. */
+function timelineLines(items: TimelineItem[]): string[] {
   const lines: string[] = [];
   let day = '';
   for (const item of items) {
     const itemDay = item.localStart.slice(0, 10);
     if (itemDay !== day) {
       day = itemDay;
-      lines.push(`${lines.length ? '\n' : ''}__**${DateTime.fromISO(itemDay).toFormat('cccc, LLL d')}**__`);
+      lines.push(`${lines.length ? '\n' : ''}__**${DateTime.fromISO(itemDay, { zone: 'utc' }).toFormat('cccc, LLL d')}**__`);
     }
-    const end = item.localEnd ? `–${when(item.localEnd, item.endsAt, 't')}` : '';
-    const where = item.location ? ` · ${text(item.location)}` : '';
-    lines.push(`${when(item.localStart, item.startsAt, 't')}${end} **${text(item.title)}**${where}`);
+    const start = when(item.localStart, item.startsAt, 't');
+    if (item.kind === 'deadline') {
+      const countdown = item.startsAt ? ` · <t:${unix(item.startsAt)}:R>` : '';
+      const detail = item.description ? ` — ${text(item.description)}` : '';
+      lines.push(`⏰ ${start} **${text(item.title)}**${countdown}${detail}`);
+    } else {
+      const end = item.localEnd ? `–${when(item.localEnd, item.endsAt, 't')}` : '';
+      const where = item.location ? ` · ${text(item.location)}` : '';
+      lines.push(`${start}${end} **${text(item.title)}**${where}`);
+    }
   }
   return lines;
+}
+
+/** The next deadline still ahead (or the first one, if times aren't known in UTC). */
+function nextDeadline(items: TimelineItem[], now: Date): string | null {
+  const deadlines = items.filter((item) => item.kind === 'deadline');
+  const upcoming = deadlines.find((item) => item.startsAt && Date.parse(item.startsAt) > now.getTime());
+  if (upcoming?.startsAt) {
+    return `**${text(upcoming.title)}** · <t:${unix(upcoming.startsAt)}:f> (<t:${unix(upcoming.startsAt)}:R>)`;
+  }
+  const unknownZone = deadlines.find((item) => !item.startsAt);
+  return unknownZone ? `**${text(unknownZone.title)}** · ${when(unknownZone.localStart, null, 'f')}` : null;
 }
 
 function footerText(event: StoredEvent): string {
@@ -128,6 +147,11 @@ function footerText(event: StoredEvent): string {
   return parts.join(' · ');
 }
 
+function timezoneText(event: StoredEvent): string {
+  if (!event.timezone) return 'Unknown, so times are shown as written. Set it with `/timezone`.';
+  return event.timezoneOverride ? `${event.timezone} (set manually)` : event.timezone;
+}
+
 function actionRow(): ActionRowBuilder<MessageActionRowComponentBuilder> {
   return new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
     new ButtonBuilder().setCustomId(PASTE_BUTTON_ID).setLabel('Paste schedule').setStyle(ButtonStyle.Primary),
@@ -135,32 +159,32 @@ function actionRow(): ActionRowBuilder<MessageActionRowComponentBuilder> {
   );
 }
 
-/** The cards for an event: overview, deadlines, requirements, judging, rules, then the schedule. */
-export function buildEventMessages(event: StoredEvent, timeline: TimelineItem[]): EventMessage[] {
-  const deadlines = timeline.filter((item) => item.kind === 'deadline');
-  const schedule = timeline.filter((item) => item.kind !== 'deadline');
+/**
+ * The cards for an event: overview (with the next deadline), requirements, judging, rules,
+ * then the timeline. Never throws for stored data: every text is cut to Discord's limits.
+ */
+export function buildEventMessages(event: StoredEvent, timeline: TimelineItem[], now = new Date()): EventMessage[] {
+  const hasSchedule = timeline.some((item) => item.kind !== 'deadline');
+  const field = (name: string, value: string, inline = false) => ({
+    name: truncate(name, LIMITS.fieldName),
+    value: truncate(value, LIMITS.fieldValue),
+    inline,
+  });
 
   const overview = new EmbedBuilder()
-    .setTitle((event.name ?? 'Hackathon').slice(0, 256))
+    .setTitle(truncate(event.name?.trim() || 'Hackathon', LIMITS.title))
     .setURL(event.sourceUrl)
-    .setDescription(event.summary ? text(event.summary) : 'No summary found.')
-    .addFields(
-      ...(event.venue ? [{ name: 'Venue', value: text(event.venue).slice(0, 1024), inline: true }] : []),
-      {
-        name: 'Time zone',
-        value: event.timezone ?? 'Unknown, so times are shown as written. Set it with `/timezone`.',
-        inline: true,
-      },
-    )
-    .setFooter({ text: footerText(event) })
+    .setDescription(truncate(event.summary?.trim() ? text(event.summary) : 'No summary found.', LIMITS.description))
+    .setFooter({ text: truncate(footerText(event), LIMITS.footer) })
     .setColor(COLORS.overview);
-  if (event.fetchedAt) overview.setTimestamp(new Date(`${event.fetchedAt}Z`));
-  if (schedule.length === 0) {
-    overview.addFields({
-      name: 'Schedule',
-      value: "I couldn't find a schedule. If you have one, use **Paste schedule** below.",
-    });
+  if (event.venue) overview.addFields(field('Venue', text(event.venue), true));
+  overview.addFields(field('Time zone', timezoneText(event), true));
+  const next = nextDeadline(timeline, now);
+  if (next) overview.addFields(field('⏰ Next deadline', next));
+  if (!hasSchedule) {
+    overview.addFields(field('Schedule', "I couldn't find a schedule. If you have one, use **Paste schedule** below."));
   }
+  if (event.fetchedAt) overview.setTimestamp(new Date(`${event.fetchedAt}Z`));
 
   const judgingLines = event.judgingCriteria.map((criterion) => {
     const weight = criterion.weight ? ` (${text(criterion.weight)})` : '';
@@ -170,19 +194,18 @@ export function buildEventMessages(event: StoredEvent, timeline: TimelineItem[])
 
   const embeds = [
     overview,
-    ...sectionEmbeds('⏰ Deadlines', deadlineLines(deadlines), COLORS.deadlines),
     ...sectionEmbeds('✅ Requirements', event.requirements.map((item) => `• ${text(item)}`), COLORS.requirements),
     ...sectionEmbeds('⚖️ Judging criteria', judgingLines, COLORS.judging),
     ...sectionEmbeds('📜 Rules highlights', event.rules.map((item) => `• ${text(item)}`), COLORS.judging),
-    ...sectionEmbeds('🗓️ Schedule', scheduleLines(schedule), COLORS.schedule),
+    ...sectionEmbeds('🗓️ Timeline', timelineLines(timeline), COLORS.timeline),
   ];
 
   const messages: EventMessage[] = packEmbeds(embeds).map((group) => ({ embeds: group, components: [] }));
-  if (schedule.length === 0) messages[messages.length - 1]!.components.push(actionRow());
+  if (!hasSchedule) messages[messages.length - 1]!.components.push(actionRow());
   return messages;
 }
 
-/** Shown when nothing could be read from the site. */
+/** Shown when the site couldn't be read, or reading it failed partway. */
 export function buildFailureMessage(url: string, reasons: string[]): EventMessage {
   const details = reasons.length ? `\n${reasons.slice(0, 3).map((reason) => `• ${text(reason)}`).join('\n')}` : '';
   return {
@@ -190,9 +213,12 @@ export function buildFailureMessage(url: string, reasons: string[]): EventMessag
       new EmbedBuilder()
         .setTitle("Couldn't read the hackathon site")
         .setDescription(
-          `I wasn't able to read ${url}.${details}\n\nYou can paste the schedule, rules and deadlines instead, or try again later.`,
+          truncate(
+            `I wasn't able to read ${url}.${details}\n\nYou can paste the schedule, rules and deadlines instead, or try again later.`,
+            LIMITS.description,
+          ),
         )
-        .setColor(COLORS.deadlines),
+        .setColor(COLORS.failure),
     ],
     components: [actionRow()],
   };

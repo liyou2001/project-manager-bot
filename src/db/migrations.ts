@@ -71,6 +71,10 @@ const migrations: string[] = [
   );
   CREATE INDEX timeline_items_guild_start ON timeline_items (guild_id, starts_at);
   `,
+  // 4: a time zone set with /timezone, kept separately so re-reading the site doesn't undo it.
+  `
+  ALTER TABLE event_info ADD COLUMN timezone_override TEXT;
+  `,
 ];
 
 export function runMigrations(db: Database): void {

@@ -70,6 +70,13 @@ describe('scoreLink', () => {
     expect(score('https://hacknc.com/sponsors')).toBe(0);
   });
 
+  it('skips files such as PDFs and calendar invites, whatever the link says', () => {
+    expect(score('https://hacknc.com/schedule.pdf', 'Schedule')).toBe(0);
+    expect(score('https://hacknc.com/schedule.ics', 'Add to calendar')).toBe(0);
+    expect(score('https://hacknc.com/hacker-guide.PDF')).toBe(0);
+    expect(score('https://hacknc.notion.site/guide.pdf', 'Hacker Guide')).toBe(0);
+  });
+
   it('follows hacker guides on Notion or Google Docs, but not other external sites', () => {
     expect(score('https://hacknc.notion.site/abc', 'Hacker Guide')).toBeGreaterThan(0);
     expect(score('https://hacknc.notion.site/abc', 'Photos')).toBe(0);

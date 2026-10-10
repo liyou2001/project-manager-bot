@@ -9,11 +9,15 @@ export interface EventSources {
 
 export interface StoredEvent {
   guildId: string;
+  /** The hackathon link this info was read from. */
   sourceUrl: string;
   name: string | null;
   summary: string | null;
   venue: string | null;
+  /** Zone the times use: the manual override if set, else the one found on the site. */
   timezone: string | null;
+  detectedTimezone: string | null;
+  timezoneOverride: string | null;
   requirements: string[];
   judgingCriteria: JudgingCriterion[];
   rules: string[];
@@ -42,6 +46,7 @@ interface EventInfoRow {
   summary: string | null;
   venue: string | null;
   timezone: string | null;
+  timezone_override: string | null;
   requirements_json: string;
   judging_json: string;
   rules_json: string;
@@ -63,17 +68,24 @@ interface TimelineRow {
   description: string | null;
 }
 
+// Pasted text and a manual time zone belong to one hackathon: both are dropped when the
+// link changes, so a previous event's schedule or zone never leaks into the new one.
+const SAME_SOURCE = 'event_info.source_url = excluded.source_url';
+
 const upsertInfo = db.prepare(`
   INSERT INTO event_info (guild_id, source_url, name, summary, venue, timezone,
     requirements_json, judging_json, rules_json, sources_json, fetched_at)
   VALUES (@guildId, @sourceUrl, @name, @summary, @venue, @timezone,
     @requirements, @judging, @rules, @sources, datetime('now'))
   ON CONFLICT(guild_id) DO UPDATE SET
-    source_url = excluded.source_url, name = excluded.name, summary = excluded.summary,
-    venue = excluded.venue, timezone = excluded.timezone,
+    name = excluded.name, summary = excluded.summary, venue = excluded.venue,
+    timezone = excluded.timezone,
     requirements_json = excluded.requirements_json, judging_json = excluded.judging_json,
     rules_json = excluded.rules_json, sources_json = excluded.sources_json,
-    fetched_at = excluded.fetched_at
+    fetched_at = excluded.fetched_at,
+    pasted_text = CASE WHEN ${SAME_SOURCE} THEN event_info.pasted_text END,
+    timezone_override = CASE WHEN ${SAME_SOURCE} THEN event_info.timezone_override END,
+    source_url = excluded.source_url
 `);
 const deleteEventItems = db.prepare<[string]>("DELETE FROM timeline_items WHERE guild_id = ? AND source = 'event'");
 const insertItem = db.prepare(`
@@ -88,9 +100,13 @@ const listItems = db.prepare<[string], TimelineRow>(
 const appendPasted = db.prepare(`
   INSERT INTO event_info (guild_id, source_url, pasted_text) VALUES (@guildId, @sourceUrl, @text)
   ON CONFLICT(guild_id) DO UPDATE SET
-    pasted_text = COALESCE(event_info.pasted_text || char(10) || char(10), '') || excluded.pasted_text
+    pasted_text = CASE WHEN ${SAME_SOURCE}
+      THEN COALESCE(event_info.pasted_text || char(10) || char(10), '') || excluded.pasted_text
+      ELSE excluded.pasted_text END,
+    timezone_override = CASE WHEN ${SAME_SOURCE} THEN event_info.timezone_override END,
+    source_url = excluded.source_url
 `);
-const updateTimezone = db.prepare<[string | null, string]>('UPDATE event_info SET timezone = ? WHERE guild_id = ?');
+const updateOverride = db.prepare<[string | null, string]>('UPDATE event_info SET timezone_override = ? WHERE guild_id = ?');
 const updateItemTimes = db.prepare<[string | null, string | null, number]>(
   'UPDATE timeline_items SET starts_at = ?, ends_at = ? WHERE id = ?',
 );
@@ -104,7 +120,7 @@ export const saveEventInfo = db.transaction(
       name: event.name,
       summary: event.summary,
       venue: event.venue,
-      timezone: event.timezone,
+      timezone: event.detectedTimezone,
       requirements: JSON.stringify(event.requirements),
       judging: JSON.stringify(event.judgingCriteria),
       rules: JSON.stringify(event.rules),
@@ -124,7 +140,9 @@ export function getEventInfo(guildId: string): StoredEvent | undefined {
     name: row.name,
     summary: row.summary,
     venue: row.venue,
-    timezone: row.timezone,
+    timezone: row.timezone_override ?? row.timezone,
+    detectedTimezone: row.timezone,
+    timezoneOverride: row.timezone_override,
     requirements: JSON.parse(row.requirements_json) as string[],
     judgingCriteria: JSON.parse(row.judging_json) as JudgingCriterion[],
     rules: JSON.parse(row.rules_json) as string[],
@@ -149,17 +167,26 @@ export function listTimeline(guildId: string): TimelineItem[] {
   }));
 }
 
-/** Add schedule text the team pasted in; it's included in every later extraction. */
+/**
+ * Add schedule text the team pasted in; it's included in every later extraction for this
+ * hackathon link. Pasting for a different link starts over.
+ */
 export function appendPastedText(guildId: string, sourceUrl: string, text: string): void {
   appendPasted.run({ guildId, sourceUrl, text });
 }
 
-/** Change the event's time zone and recompute every item's UTC times from its local times. */
-export const setEventTimezone = db.transaction((guildId: string, timezone: string): number => {
-  updateTimezone.run(timezone, guildId);
-  const items = listItems.all(guildId);
-  for (const item of items) {
-    updateItemTimes.run(localToUtc(item.local_start, timezone), localToUtc(item.local_end, timezone), item.id);
-  }
-  return items.length;
-});
+/**
+ * Set (or with null, clear) the manual time zone, then recompute every item's UTC times
+ * from its local times. Returns the zone now in effect and how many items were updated.
+ */
+export const setEventTimezone = db.transaction(
+  (guildId: string, override: string | null): { timezone: string | null; updated: number } => {
+    updateOverride.run(override, guildId);
+    const timezone = getEventInfo(guildId)?.timezone ?? null;
+    const items = listItems.all(guildId);
+    for (const item of items) {
+      updateItemTimes.run(localToUtc(item.local_start, timezone), localToUtc(item.local_end, timezone), item.id);
+    }
+    return { timezone, updated: items.length };
+  },
+);

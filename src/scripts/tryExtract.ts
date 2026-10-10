@@ -20,7 +20,7 @@ if (!url) {
   process.exit(1);
 }
 
-const renderer = flag('--no-render') ? null : await createRenderer();
+const renderer = flag('--no-render') ? null : createRenderer();
 const started = Date.now();
 let result;
 try {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { EventInfo } from '../ai/schemas.js';
-import { localToUtc, normalizeEvent, parseLocalTime } from './normalize.js';
+import { isValidTimezone, localToUtc, normalizeEvent, parseLocalTime } from './normalize.js';
 
 function rawEvent(overrides: Partial<EventInfo> = {}): EventInfo {
   return {
@@ -38,12 +38,29 @@ describe('localToUtc', () => {
   });
 });
 
+describe('isValidTimezone', () => {
+  it('accepts city-based zones and UTC', () => {
+    for (const zone of ['America/New_York', 'Asia/Kolkata', 'US/Eastern', 'UTC']) expect(isValidTimezone(zone)).toBe(true);
+  });
+  it('rejects fixed-offset zones that ignore daylight saving, and junk', () => {
+    for (const zone of ['EST', 'MST', 'EST5EDT', 'Etc/GMT+5', 'Mars/Olympus', '', null]) expect(isValidTimezone(zone)).toBe(false);
+  });
+});
+
 describe('parseLocalTime', () => {
   it('accepts ISO-ish times and rejects junk', () => {
     expect(parseLocalTime('2026-10-10T09:00')).toBe('2026-10-10T09:00');
-    expect(parseLocalTime('2026-10-10 9:00')).toBeNull();
+    expect(parseLocalTime('2026-10-10 9:00')).toBe('2026-10-10T09:00');
     expect(parseLocalTime('2026-10-10 09:00')).toBe('2026-10-10T09:00');
+    expect(parseLocalTime('2026-02-30T09:00')).toBeNull();
     expect(parseLocalTime('Saturday morning')).toBeNull();
+  });
+  it('keeps the wall-clock time when the model adds seconds or a UTC offset', () => {
+    expect(parseLocalTime('2026-10-10T09:00:00-04:00')).toBe('2026-10-10T09:00');
+    expect(parseLocalTime('2026-10-10T09:00Z')).toBe('2026-10-10T09:00');
+  });
+  it('treats a date without a time as unreadable', () => {
+    expect(parseLocalTime('2026-10-11')).toBeNull();
   });
 });
 
@@ -74,9 +91,17 @@ describe('normalizeEvent', () => {
   });
 
   it('keeps local times but no UTC times when the time zone is invalid', () => {
-    const event = normalizeEvent(rawEvent({ timezone: 'EDT', schedule: [item('Lunch', '2026-10-10T12:00')] }));
+    const event = normalizeEvent(rawEvent({ timezone: 'EST', schedule: [item('Lunch', '2026-10-10T12:00')] }));
     expect(event.timezone).toBeNull();
     expect(event.timeline[0]).toMatchObject({ localStart: '2026-10-10T12:00', startsAt: null });
+  });
+
+  it('uses a manual time zone over the one found on the site, but remembers the detected one', () => {
+    const event = normalizeEvent(rawEvent({ schedule: [item('Lunch', '2026-10-10T12:00')] }), {
+      timezoneOverride: 'America/Los_Angeles',
+    });
+    expect(event).toMatchObject({ timezone: 'America/Los_Angeles', detectedTimezone: 'America/New_York' });
+    expect(event.timeline[0]!.startsAt).toBe('2026-10-10T19:00:00Z');
   });
 
   it('trims and de-duplicates lists, and keeps at most 8 rules', () => {

@@ -27,7 +27,9 @@ const NOT_OFFICIAL = [
 ];
 const IGNORED_LABELS = new Set(['www', 'co', 'com', 'org', 'net', 'edu', 'ac']);
 
-const SKIP = /log-?in|sign-?in|sign-?up|register|registration|\bapply\b|dashboard|portal|team-?finder|sponsor|privacy|terms|cookie|cdn-cgi|\.(png|jpe?g|gif|svg|webp|pdf|zip|ics)$/i;
+const SKIP = /log-?in|sign-?in|sign-?up|register|registration|\bapply\b|dashboard|portal|team-?finder|sponsor|privacy|terms|cookie|cdn-cgi/i;
+// Files, not web pages. Checked against the path alone.
+const FILE_EXTENSION = /\.(png|jpe?g|gif|svg|webp|pdf|zip|ics|docx?|pptx?|xlsx?|mp4|mov)$/i;
 const SCHEDULE_WORDS = /schedule|agenda|itinerary|timeline|\bevents?\b|workshops?/i;
 const INFO_WORDS = /faq|rules|\binfo\b|tracks?|judging|prizes?|resources|guide|details|hackers?\b/i;
 const GUIDE_HOSTS = ['notion.site', 'notion.so', 'docs.google.com'];
@@ -108,6 +110,7 @@ function officialPageScore(url: URL, text: string): number {
 export function scoreLink(link: PageLink, roles: SiteRoles): number {
   const url = new URL(link.url);
   const host = url.hostname;
+  if (FILE_EXTENSION.test(url.pathname)) return 0;
 
   if (roles.devpostHost && host === roles.devpostHost) {
     if (url.search) return 0;
