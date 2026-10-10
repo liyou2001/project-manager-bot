@@ -4,10 +4,10 @@
   "description": "",
   "main": "dist/index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "vitest run",
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
-    "build": "tsc",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit"
   },
   "keywords": [],
@@ -15,14 +15,23 @@
   "license": "ISC",
   "type": "module",
   "dependencies": {
+    "@ai-sdk/anthropic": "^3.0.129",
+    "@ai-sdk/google": "^3.0.131",
+    "@ai-sdk/openai": "^3.0.125",
+    "ai": "^6.0.303",
     "better-sqlite3": "^12.11.1",
+    "cheerio": "^1.2.0",
     "discord.js": "^14.27.0",
-    "dotenv": "^18.0.7"
+    "dotenv": "^18.0.7",
+    "luxon": "^3.7.2",
+    "zod": "^4.6.5"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^9.6.0",
+    "@types/luxon": "^3.7.6",
     "@types/node": "^20.19.43",
     "tsx": "^4.23.15",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11"
   }
 }

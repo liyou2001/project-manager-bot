@@ -1,22 +1,10 @@
 import 'dotenv/config';
-import {
-  Client,
-  Events,
-  GatewayIntentBits,
-  InteractionContextType,
-  MessageFlags,
-  PermissionFlagsBits,
-  SlashCommandBuilder,
-} from 'discord.js';
-import { clearPrompted, getProject } from './db.js';
-import {
-  SETUP_BUTTON_ID,
-  SETUP_MODAL_ID,
-  handleSetupSubmit,
-  openSetupModal,
-  projectEmbed,
-  promptIfNeeded,
-} from './setup.js';
+import { Client, Events, GatewayIntentBits } from 'discord.js';
+import { checkAiConfig } from './ai/llm.js';
+import { commands } from './commands/index.js';
+import { clearPrompted } from './db/projects.js';
+import { handleInteraction } from './interactions.js';
+import { promptIfNeeded } from './setup.js';
 
 const token = process.env.DISCORD_TOKEN;
 if (!token) {
@@ -24,22 +12,17 @@ if (!token) {
   process.exit(1);
 }
 
-const commands = [
-  new SlashCommandBuilder()
-    .setName('setup')
-    .setDescription("Set or update this server's project website and GitHub links")
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-    .setContexts(InteractionContextType.Guild),
-  new SlashCommandBuilder()
-    .setName('project')
-    .setDescription("Show this server's project links")
-    .setContexts(InteractionContextType.Guild),
-].map((command) => command.toJSON());
+try {
+  console.log(`AI model: ${checkAiConfig().join(', ')}`);
+} catch (error) {
+  console.error(`AI is not configured: ${(error as Error).message}`);
+  process.exit(1);
+}
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 client.once(Events.ClientReady, async (readyClient) => {
-  await readyClient.application.commands.set(commands);
+  await readyClient.application.commands.set(commands.map((command) => command.data.toJSON()));
   console.log(`Logged in as ${readyClient.user.tag} (in ${readyClient.guilds.cache.size} servers)`);
 
   // Catch servers that added the bot while it was offline.
@@ -59,33 +42,6 @@ client.on(Events.GuildDelete, (guild) => {
   clearPrompted(guild.id);
 });
 
-client.on(Events.InteractionCreate, async (interaction) => {
-  try {
-    if (interaction.isChatInputCommand()) {
-      if (!interaction.inGuild()) return;
-      if (interaction.commandName === 'setup') {
-        await openSetupModal(interaction);
-      } else if (interaction.commandName === 'project') {
-        const project = getProject(interaction.guildId);
-        await interaction.reply(
-          project
-            ? { embeds: [projectEmbed(project).setTitle('Project links')] }
-            : { content: 'No project links yet. Ask an admin to run `/setup`.', flags: MessageFlags.Ephemeral },
-        );
-      }
-    } else if (interaction.isButton() && interaction.customId === SETUP_BUTTON_ID) {
-      await openSetupModal(interaction);
-    } else if (interaction.isModalSubmit() && interaction.customId === SETUP_MODAL_ID) {
-      await handleSetupSubmit(interaction);
-    }
-  } catch (error) {
-    console.error('Interaction failed:', error);
-    if (interaction.isRepliable() && !interaction.replied && !interaction.deferred) {
-      await interaction
-        .reply({ content: 'Something went wrong. Please try again.', flags: MessageFlags.Ephemeral })
-        .catch(() => {});
-    }
-  }
-});
+client.on(Events.InteractionCreate, handleInteraction);
 
 client.login(token);

@@ -1,6 +1,4 @@
-import Database from 'better-sqlite3';
-import { mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { db } from './index.js';
 
 export interface ProjectRow {
   guild_id: string;
@@ -19,32 +17,6 @@ export interface ProjectInput {
   githubUrl: string;
   updatedBy: string;
 }
-
-const dbPath = process.env.DATABASE_PATH || 'data/bot.db';
-mkdirSync(dirname(dbPath), { recursive: true });
-
-const db = new Database(dbPath);
-db.pragma('journal_mode = WAL');
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS guild_projects (
-    guild_id    TEXT PRIMARY KEY,
-    guild_name  TEXT,
-    website_url TEXT NOT NULL,
-    github_url  TEXT NOT NULL,
-    updated_by  TEXT NOT NULL,
-    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
-  )
-`);
-
-// Guilds that have been sent the setup prompt, so restarts don't re-send it.
-db.exec(`
-  CREATE TABLE IF NOT EXISTS guild_prompts (
-    guild_id    TEXT PRIMARY KEY,
-    prompted_at TEXT NOT NULL DEFAULT (datetime('now'))
-  )
-`);
 
 const upsertStmt = db.prepare<ProjectInput>(`
   INSERT INTO guild_projects (guild_id, guild_name, website_url, github_url, updated_by)

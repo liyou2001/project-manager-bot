@@ -14,14 +14,18 @@ import {
   type ChatInputCommandInteraction,
   type Guild,
   type GuildBasedChannel,
+  type MessageComponentInteraction,
   type MessageCreateOptions,
   type ModalSubmitInteraction,
   type TextChannel,
 } from 'discord.js';
-import { getProject, markPrompted, saveProject, wasPrompted, type ProjectRow } from './db.js';
+import type { ComponentHandler } from './commands/types.js';
+import { getProject, markPrompted, saveProject, wasPrompted, type ProjectRow } from './db/projects.js';
+import { parseGithubUrl, parseHttpUrl } from './util/urls.js';
 
-export const SETUP_BUTTON_ID = 'project-setup:open';
-export const SETUP_MODAL_ID = 'project-setup:submit';
+const SETUP_PREFIX = 'project-setup';
+const SETUP_BUTTON_ID = `${SETUP_PREFIX}:open`;
+const SETUP_MODAL_ID = `${SETUP_PREFIX}:submit`;
 const WEBSITE_INPUT_ID = 'website';
 const GITHUB_INPUT_ID = 'github';
 
@@ -52,7 +56,7 @@ function buildPrompt(): MessageCreateOptions {
   const embed = new EmbedBuilder()
     .setTitle('Thanks for adding me!')
     .setDescription(
-      "To get started, I need this project's **website** and **GitHub** links.\n" +
+      "To get started, I need your **hackathon page** (Devpost or the event site) and your project's **GitHub** link.\n" +
         'Click the button below to enter them. You can change them later with `/setup`.',
     )
     .setColor(0x5865f2);
@@ -93,11 +97,11 @@ export async function promptIfNeeded(guild: Guild): Promise<void> {
   }
 }
 
-export function buildSetupModal(existing?: ProjectRow): ModalBuilder {
+function buildSetupModal(existing?: ProjectRow): ModalBuilder {
   const website = new TextInputBuilder()
     .setCustomId(WEBSITE_INPUT_ID)
-    .setLabel('Website URL')
-    .setPlaceholder('https://example.com')
+    .setLabel('Hackathon page (Devpost or event site)')
+    .setPlaceholder('https://your-hackathon.devpost.com')
     .setStyle(TextInputStyle.Short)
     .setRequired(true)
     .setMaxLength(200);
@@ -124,31 +128,7 @@ export function buildSetupModal(existing?: ProjectRow): ModalBuilder {
     );
 }
 
-/** Returns a normalized http(s) URL string, or null if invalid. */
-function parseHttpUrl(raw: string): string | null {
-  const value = raw.trim();
-  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(value) ? value : `https://${value}`;
-  try {
-    const url = new URL(withScheme);
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
-    if (!url.hostname.includes('.')) return null;
-    return url.toString();
-  } catch {
-    return null;
-  }
-}
-
-function parseGithubUrl(raw: string): string | null {
-  const url = parseHttpUrl(raw);
-  if (!url) return null;
-  const { hostname, pathname } = new URL(url);
-  if (hostname !== 'github.com' && hostname !== 'www.github.com') return null;
-  // Require at least an owner: github.com/owner or github.com/owner/repo
-  if (pathname.split('/').filter(Boolean).length === 0) return null;
-  return url;
-}
-
-export function canManageSetup(interaction: BaseInteraction): boolean {
+function canManageSetup(interaction: BaseInteraction): boolean {
   return interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild) ?? false;
 }
 
@@ -163,7 +143,7 @@ export async function openSetupModal(
   await interaction.showModal(buildSetupModal(getProject(interaction.guildId)));
 }
 
-export async function handleSetupSubmit(interaction: ModalSubmitInteraction): Promise<void> {
+async function handleSetupSubmit(interaction: ModalSubmitInteraction): Promise<void> {
   if (!interaction.inGuild()) return;
   if (!canManageSetup(interaction)) {
     await interaction.reply({ content: MISSING_PERMISSION_MESSAGE, flags: MessageFlags.Ephemeral });
@@ -175,7 +155,7 @@ export async function handleSetupSubmit(interaction: ModalSubmitInteraction): Pr
 
   if (!websiteUrl || !githubUrl) {
     const errors: string[] = [];
-    if (!websiteUrl) errors.push('• The website must be a valid URL, e.g. `https://example.com`.');
+    if (!websiteUrl) errors.push('• The hackathon page must be a valid URL, e.g. `https://your-hackathon.devpost.com`.');
     if (!githubUrl) errors.push('• The GitHub link must look like `https://github.com/owner/repo`.');
     await interaction.reply({
       content: `Couldn't save that:\n${errors.join('\n')}\nRun \`/setup\` to try again.`,
@@ -200,10 +180,21 @@ export function projectEmbed(project: ProjectRow): EmbedBuilder {
   return new EmbedBuilder()
     .setTitle('Project links saved')
     .addFields(
-      { name: 'Website', value: project.website_url },
+      { name: 'Hackathon page', value: project.website_url },
       { name: 'GitHub', value: project.github_url },
     )
     .setFooter({ text: 'Use /setup to change these.' })
     .setTimestamp(new Date(`${project.updated_at}Z`))
     .setColor(0x57f287);
 }
+
+export const setupComponents: ComponentHandler = {
+  prefix: SETUP_PREFIX,
+  async handle(interaction: MessageComponentInteraction | ModalSubmitInteraction, action: string) {
+    if (action === 'open' && interaction.isButton()) {
+      await openSetupModal(interaction);
+    } else if (action === 'submit' && interaction.isModalSubmit()) {
+      await handleSetupSubmit(interaction);
+    }
+  },
+};
