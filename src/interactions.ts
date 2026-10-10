@@ -1,15 +1,23 @@
 import { MessageFlags, type Interaction } from 'discord.js';
 import { commands } from './commands/index.js';
 import type { ComponentHandler } from './commands/types.js';
+import { eventComponents } from './events/components.js';
 import { setupComponents } from './setup.js';
 
 const commandsByName = new Map(commands.map((command) => [command.data.name, command]));
 
-const componentHandlers: ComponentHandler[] = [setupComponents];
+const componentHandlers: ComponentHandler[] = [setupComponents, eventComponents];
 const handlersByPrefix = new Map(componentHandlers.map((handler) => [handler.prefix, handler]));
 
-/** Route a slash command, button, select menu or modal to its handler. */
+/** Route a slash command, autocomplete, button, select menu or modal to its handler. */
 export async function handleInteraction(interaction: Interaction): Promise<void> {
+  if (interaction.isAutocomplete()) {
+    await commandsByName
+      .get(interaction.commandName)
+      ?.autocomplete?.(interaction)
+      .catch((error: unknown) => console.error('Autocomplete failed:', error));
+    return;
+  }
   try {
     if (interaction.isChatInputCommand()) {
       await commandsByName.get(interaction.commandName)?.execute(interaction);

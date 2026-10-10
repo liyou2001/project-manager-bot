@@ -38,6 +38,39 @@ const migrations: string[] = [
   DROP TABLE guild_projects;
   ALTER TABLE guild_projects_new RENAME TO guild_projects;
   `,
+  // 3: what the bot learned from the hackathon site, plus the shared timeline.
+  `
+  CREATE TABLE event_info (
+    guild_id          TEXT PRIMARY KEY,
+    source_url        TEXT NOT NULL,
+    name              TEXT,
+    summary           TEXT,
+    venue             TEXT,
+    timezone          TEXT,
+    requirements_json TEXT NOT NULL DEFAULT '[]',
+    judging_json      TEXT NOT NULL DEFAULT '[]',
+    rules_json        TEXT NOT NULL DEFAULT '[]',
+    sources_json      TEXT NOT NULL DEFAULT '{"pages":[],"skipped":[],"unreadableTimes":0}',
+    pasted_text       TEXT,
+    fetched_at        TEXT
+  );
+  -- Event schedule and deadlines (source 'event'); later also the team's plan (source 'plan').
+  CREATE TABLE timeline_items (
+    id          INTEGER PRIMARY KEY,
+    guild_id    TEXT NOT NULL,
+    source      TEXT NOT NULL CHECK (source IN ('event', 'plan')),
+    kind        TEXT NOT NULL,
+    title       TEXT NOT NULL,
+    local_start TEXT NOT NULL,
+    local_end   TEXT,
+    starts_at   TEXT,
+    ends_at     TEXT,
+    location    TEXT,
+    description TEXT,
+    reminded_at TEXT
+  );
+  CREATE INDEX timeline_items_guild_start ON timeline_items (guild_id, starts_at);
+  `,
 ];
 
 export function runMigrations(db: Database): void {

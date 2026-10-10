@@ -9,7 +9,6 @@ import {
   PermissionFlagsBits,
   TextInputBuilder,
   TextInputStyle,
-  type BaseInteraction,
   type ButtonInteraction,
   type ChatInputCommandInteraction,
   type Guild,
@@ -20,7 +19,10 @@ import {
   type TextChannel,
 } from 'discord.js';
 import type { ComponentHandler } from './commands/types.js';
+import { getEventInfo } from './db/events.js';
 import { getProject, markPrompted, saveProject, wasPrompted, type ProjectRow } from './db/projects.js';
+import { runEventRefresh } from './events/refresh.js';
+import { canManageProject, MISSING_PERMISSION_MESSAGE } from './util/permissions.js';
 import { parseGithubUrl, parseHttpUrl } from './util/urls.js';
 
 const SETUP_PREFIX = 'project-setup';
@@ -28,8 +30,6 @@ const SETUP_BUTTON_ID = `${SETUP_PREFIX}:open`;
 const SETUP_MODAL_ID = `${SETUP_PREFIX}:submit`;
 const WEBSITE_INPUT_ID = 'website';
 const GITHUB_INPUT_ID = 'github';
-
-const MISSING_PERMISSION_MESSAGE = 'You need the **Manage Server** permission to set up the project.';
 
 /** Pick a channel in a newly joined guild where the bot is allowed to post. */
 function findPromptChannel(guild: Guild): TextChannel | undefined {
@@ -128,15 +128,11 @@ function buildSetupModal(existing?: ProjectRow): ModalBuilder {
     );
 }
 
-function canManageSetup(interaction: BaseInteraction): boolean {
-  return interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild) ?? false;
-}
-
 export async function openSetupModal(
   interaction: ChatInputCommandInteraction | ButtonInteraction,
 ): Promise<void> {
   if (!interaction.inGuild()) return;
-  if (!canManageSetup(interaction)) {
+  if (!canManageProject(interaction)) {
     await interaction.reply({ content: MISSING_PERMISSION_MESSAGE, flags: MessageFlags.Ephemeral });
     return;
   }
@@ -145,7 +141,7 @@ export async function openSetupModal(
 
 async function handleSetupSubmit(interaction: ModalSubmitInteraction): Promise<void> {
   if (!interaction.inGuild()) return;
-  if (!canManageSetup(interaction)) {
+  if (!canManageProject(interaction)) {
     await interaction.reply({ content: MISSING_PERMISSION_MESSAGE, flags: MessageFlags.Ephemeral });
     return;
   }
@@ -167,6 +163,7 @@ async function handleSetupSubmit(interaction: ModalSubmitInteraction): Promise<v
     return;
   }
 
+  const previous = getProject(interaction.guildId);
   saveProject({
     guildId: interaction.guildId,
     guildName: interaction.guild?.name ?? null,
@@ -176,7 +173,13 @@ async function handleSetupSubmit(interaction: ModalSubmitInteraction): Promise<v
   });
 
   const saved = getProject(interaction.guildId);
-  if (saved) await interaction.reply({ embeds: [projectEmbed(saved)] });
+  if (!saved) return;
+  await interaction.reply({ embeds: [projectEmbed(saved)] });
+
+  // Read the hackathon site when the link is new or changed, or it hasn't been read yet.
+  if (previous?.website_url !== saved.website_url || !getEventInfo(interaction.guildId)?.fetchedAt) {
+    await runEventRefresh(interaction);
+  }
 }
 
 export function projectEmbed(project: ProjectRow): EmbedBuilder {

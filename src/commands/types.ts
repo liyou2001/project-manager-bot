@@ -1,4 +1,5 @@
 import type {
+  AutocompleteInteraction,
   ChatInputCommandInteraction,
   MessageComponentInteraction,
   ModalSubmitInteraction,
@@ -9,6 +10,8 @@ import type {
 export interface Command {
   data: { name: string; toJSON(): RESTPostAPIChatInputApplicationCommandsJSONBody };
   execute(interaction: ChatInputCommandInteraction): Promise<void>;
+  /** Suggestions for options declared with setAutocomplete(true). */
+  autocomplete?(interaction: AutocompleteInteraction): Promise<void>;
 }
 
 /**

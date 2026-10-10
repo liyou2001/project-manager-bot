@@ -11,7 +11,7 @@ describe('runMigrations', () => {
   it('creates the schema on a fresh database and records the version', () => {
     const db = new Database(':memory:');
     runMigrations(db);
-    expect(tableNames(db)).toEqual(['guild_projects', 'guild_prompts']);
+    expect(tableNames(db)).toEqual(['event_info', 'guild_projects', 'guild_prompts', 'timeline_items']);
     expect(db.pragma('user_version', { simple: true })).toBeGreaterThan(0);
   });
 
